@@ -18,6 +18,7 @@
     "zustand": "^5.0.0"
   },
   "devDependencies": {
+    "@google/genai": "^1.44.0",
     "@tauri-apps/cli": "^2.5.0",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",

@@ -13,6 +13,7 @@ import type {
 import { useProjectStore } from "./project-store";
 import { useDecisionStore } from "./decision-store";
 import { useActivityStore } from "./activity-store";
+import { interpretStopEvent } from "../lib/state-interpreter";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -76,6 +77,12 @@ function reconnectDelay(attempt: number): number {
   return Math.min(1000 * Math.pow(2, attempt), MAX_RECONNECT_DELAY);
 }
 
+/** Track connections where auto-reconnect is suppressed (manual disconnect) */
+const suppressReconnect = new Set<string>();
+
+/** Track the "current" WebSocket for each connection to detect stale callbacks */
+const liveWs = new Map<string, WebSocket>();
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
@@ -106,6 +113,8 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
 
   removeServer(id: string) {
     get().disconnect(id);
+    liveWs.delete(id);
+    suppressReconnect.delete(id);
     set((state) => {
       const next = new Map(state.connections);
       next.delete(id);
@@ -121,16 +130,19 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
     if (conn.ws && conn.status === "connected") return;
 
     // Clean up previous connection
-    if (conn.ws) {
-      conn.ws.onclose = null;
-      conn.ws.onerror = null;
-      conn.ws.onmessage = null;
-      conn.ws.close();
+    const prevWs = liveWs.get(id);
+    if (prevWs) {
+      prevWs.onopen = null;
+      prevWs.onclose = null;
+      prevWs.onerror = null;
+      prevWs.onmessage = null;
+      prevWs.close();
     }
     if (conn.reconnectTimer) {
       clearTimeout(conn.reconnectTimer);
     }
 
+    suppressReconnect.delete(id);
     get()._setConnectionStatus(id, "connecting");
 
     let ws: WebSocket;
@@ -141,7 +153,12 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
       return;
     }
 
+    liveWs.set(id, ws);
+
     ws.onopen = () => {
+      // Ignore if this ws is no longer the current one
+      if (liveWs.get(id) !== ws) return;
+
       set((s) => {
         const next = new Map(s.connections);
         const c = next.get(id);
@@ -156,9 +173,14 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
         }
         return { connections: next };
       });
+
+      // Fetch initial data from the server
+      fetchInitialData(id, get().sendRpc);
     };
 
     ws.onmessage = (event) => {
+      if (liveWs.get(id) !== ws) return;
+
       let data: JsonRpcResponse | JsonRpcNotification;
       try {
         data = JSON.parse(event.data as string);
@@ -192,8 +214,11 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
     };
 
     ws.onclose = () => {
+      // Ignore if this ws is no longer the current one, or manually disconnected
+      if (liveWs.get(id) !== ws || suppressReconnect.has(id)) return;
+
       get()._setConnectionStatus(id, "disconnected");
-      // Schedule reconnect
+      // Schedule auto-reconnect
       const current = get().connections.get(id);
       if (!current) return;
       const attempt = current.reconnectAttempt;
@@ -220,10 +245,11 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
     };
 
     ws.onerror = () => {
+      if (liveWs.get(id) !== ws) return;
       get()._setConnectionStatus(id, "error");
     };
 
-    // Store ws reference
+    // Store ws reference in Zustand state
     set((s) => {
       const next = new Map(s.connections);
       const c = next.get(id);
@@ -235,15 +261,25 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
   },
 
   disconnect(id: string) {
+    suppressReconnect.add(id);
+
     const conn = get().connections.get(id);
     if (!conn) return;
     if (conn.reconnectTimer) {
       clearTimeout(conn.reconnectTimer);
     }
-    if (conn.ws) {
-      conn.ws.onclose = null; // prevent auto-reconnect
-      conn.ws.close();
+
+    // Kill the live WebSocket and null ALL handlers
+    const ws = liveWs.get(id);
+    if (ws) {
+      ws.onopen = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      ws.onmessage = null;
+      ws.close();
     }
+    liveWs.delete(id);
+
     set((s) => {
       const next = new Map(s.connections);
       const c = next.get(id);
@@ -258,6 +294,9 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
       }
       return { connections: next };
     });
+
+    // Clear this server's data from other stores
+    useProjectStore.getState().clearServer(id);
   },
 
   sendRpc(
@@ -358,6 +397,71 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
 // Notification dispatcher
 // ---------------------------------------------------------------------------
 
+async function fetchInitialData(
+  serverId: string,
+  sendRpc: ConnectionStore["sendRpc"],
+) {
+  try {
+    const [projectsRes, decisionsRes, activityRes] = await Promise.all([
+      sendRpc(serverId, "projects.list") as Promise<{
+        projects: ProjectState[];
+      }>,
+      sendRpc(serverId, "decisions.list") as Promise<{
+        decisions: DecisionItem[];
+      }>,
+      sendRpc(serverId, "activity.list", { limit: 100 }) as Promise<{
+        entries: ActivityEntry[];
+      }>,
+    ]);
+
+    useProjectStore.getState().setProjects(serverId, projectsRes.projects);
+    for (const d of decisionsRes.decisions) {
+      useDecisionStore.getState().addDecision(serverId, d);
+    }
+    for (const e of activityRes.entries) {
+      useActivityStore.getState().addEntry(serverId, e);
+    }
+
+    // Generate decisions for sessions that are already blocked on connect.
+    // The server's waiting-for-input events may have fired before we connected.
+    for (const project of projectsRes.projects) {
+      for (const session of project.sessions) {
+        if (session.phase === "blocked" && session.isActive && !session.terminated) {
+          const existing = useDecisionStore.getState().decisions.some(
+            (d) => d.sessionId === session.id,
+          );
+          if (!existing) {
+            // Fetch the actual last message from the server for LLM context
+            sendRpc(serverId, "session.lastMessage", { sessionId: session.id })
+              .then((res) => {
+                const { lastMessage } = res as { lastMessage: string };
+                handleHookStop(serverId, {
+                  sessionId: session.id,
+                  projectId: project.id,
+                  projectName: project.name,
+                  lastMessage: lastMessage || "",
+                  stopReason: "waiting_for_input",
+                });
+              })
+              .catch(() => {
+                // Fallback without message context
+                handleHookStop(serverId, {
+                  sessionId: session.id,
+                  projectId: project.id,
+                  projectName: project.name,
+                  lastMessage: "",
+                  stopReason: "waiting_for_input",
+                });
+              });
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("[fetchInitialData] Failed:", err);
+  }
+}
+
 function handleNotification(
   serverId: string,
   notif: JsonRpcNotification<string, Record<string, unknown>>,
@@ -371,6 +475,12 @@ function handleNotification(
     case "project.updated": {
       const payload = notif.params as { project: ProjectState };
       useProjectStore.getState().updateProject(serverId, payload.project);
+      // Auto-dismiss decisions per session when session goes back to autonomous
+      for (const session of payload.project.sessions) {
+        if (session.phase === "autonomous") {
+          useDecisionStore.getState().dismissBySession(session.id);
+        }
+      }
       break;
     }
     case "decision.new": {
@@ -393,7 +503,43 @@ function handleNotification(
       useActivityStore.getState().addEntry(serverId, payload.entry);
       break;
     }
+    case "hook.stop": {
+      const payload = notif.params as {
+        sessionId: string;
+        projectId: string;
+        projectName: string;
+        lastMessage: string;
+        stopReason: string;
+      };
+      handleHookStop(serverId, payload);
+      break;
+    }
     default:
       break;
+  }
+}
+
+async function handleHookStop(
+  serverId: string,
+  payload: {
+    sessionId: string;
+    projectId: string;
+    projectName: string;
+    lastMessage: string;
+    stopReason: string;
+  },
+): Promise<void> {
+  let apiKey: string | null = null;
+  try {
+    apiKey = localStorage.getItem("opsveil:apiKey");
+  } catch {
+    // localStorage may not be available
+  }
+
+  try {
+    const decision = await interpretStopEvent(payload, apiKey);
+    useDecisionStore.getState().addDecision(serverId, decision, payload);
+  } catch (err) {
+    console.error("[handleHookStop] Failed to interpret stop event:", err);
   }
 }

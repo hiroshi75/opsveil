@@ -16,13 +16,33 @@ interface ClaudeSettings {
   [key: string]: unknown;
 }
 
-const OPSVEIL_MARKER = "opsveil";
-
 export class HookManager {
   private claudeDir: string;
 
   constructor(claudeDir?: string) {
     this.claudeDir = claudeDir ?? path.join(os.homedir(), ".claude");
+  }
+
+  /**
+   * Build the curl command for a given hook event.
+   *
+   * Claude Code passes hook data as JSON on stdin.
+   * We pipe it directly to our server endpoint.
+   */
+  private buildHookCommand(event: string, port: number): string {
+    const base = `http://localhost:${port}/hooks`;
+
+    const endpoints: Record<string, string> = {
+      Stop: "stop",
+      Notification: "notification",
+      PostToolUse: "post-tool-use",
+    };
+
+    const ep = endpoints[event];
+    if (!ep) throw new Error(`Unknown hook event: ${event}`);
+
+    // Pipe stdin JSON directly to server via curl
+    return `curl -sf -X POST ${base}/${ep} -H 'Content-Type: application/json' -d @-`;
   }
 
   /**
@@ -45,15 +65,9 @@ export class HookManager {
     }
 
     const hookEvents = ["Stop", "Notification", "PostToolUse"] as const;
-    const endpointMap: Record<string, string> = {
-      Stop: "stop",
-      Notification: "notification",
-      PostToolUse: "post-tool-use",
-    };
 
     for (const event of hookEvents) {
-      const endpoint = endpointMap[event];
-      const command = `curl -s -X POST http://localhost:${port}/hooks/${endpoint} -H 'Content-Type: application/json' -d "$(cat)"`;
+      const command = this.buildHookCommand(event, port);
 
       const opsveilEntry: ClaudeHookEntry = {
         matcher: "",
@@ -87,7 +101,7 @@ export class HookManager {
       "utf-8"
     );
 
-    console.log(`[HookManager] Installed hooks into ${settingsPath}`);
+    console.log(`[HookManager] Installed hooks → ${settingsPath} (port=${port})`);
   }
 
   /**

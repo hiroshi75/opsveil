@@ -6,11 +6,10 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "",
-    "beforeBuildCommand": ""
+    "beforeDevCommand": "pnpm vite dev",
+    "beforeBuildCommand": "pnpm vite build"
   },
   "app": {
-    "title": "OpsVeil - Agent Command Center",
     "windows": [
       {
         "title": "OpsVeil",

@@ -15,11 +15,13 @@ interface ProjectStore {
   /** Projects keyed by "serverId:projectId" */
   projects: Map<string, ProjectEntry>;
   selectedKey: string | null;
+  selectedSessionId: string | null;
 
   // Actions
   setProjects: (serverId: string, projects: ProjectState[]) => void;
   updateProject: (serverId: string, project: ProjectState) => void;
-  selectProject: (key: string) => void;
+  clearServer: (serverId: string) => void;
+  selectProject: (key: string, sessionId?: string | null) => void;
   clearSelection: () => void;
 
   // Computed helpers
@@ -51,6 +53,7 @@ function toEntry(serverId: string, project: ProjectState): ProjectEntry {
 export const useProjectStore = create<ProjectStore>((set, get) => ({
   projects: new Map(),
   selectedKey: null,
+  selectedSessionId: null,
 
   setProjects(serverId: string, projects: ProjectState[]) {
     set((state) => {
@@ -79,12 +82,24 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     });
   },
 
-  selectProject(key: string) {
-    set({ selectedKey: key });
+  clearServer(serverId: string) {
+    set((state) => {
+      const next = new Map(state.projects);
+      for (const key of next.keys()) {
+        if (key.startsWith(`${serverId}:`)) {
+          next.delete(key);
+        }
+      }
+      return { projects: next };
+    });
+  },
+
+  selectProject(key: string, sessionId?: string | null) {
+    set({ selectedKey: key, selectedSessionId: sessionId ?? null });
   },
 
   clearSelection() {
-    set({ selectedKey: null });
+    set({ selectedKey: null, selectedSessionId: null });
   },
 
   allProjects(): ProjectEntry[] {

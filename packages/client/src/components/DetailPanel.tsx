@@ -1,9 +1,9 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { useProjectStore } from "../stores/project-store";
 import { useConnectionStore } from "../stores/connection-store";
 import { useRpc } from "../hooks/use-rpc";
 import { ProjectActivityFeed } from "./ActivityFeed";
-import type { AgentPhase } from "@opsveil/shared";
+import type { AgentPhase, SessionState } from "@opsveil/shared";
 
 // ---------------------------------------------------------------------------
 // Phase config
@@ -11,7 +11,7 @@ import type { AgentPhase } from "@opsveil/shared";
 
 const PHASE_LABELS: Record<AgentPhase, string> = {
   autonomous: "\u81EA\u5F8B\u9032\u884C\u4E2D",
-  blocked: "\u5224\u65AD\u5F85\u3061",
+  blocked: "\u5165\u529B\u5F85\u3061",
   review: "\u30EC\u30D3\u30E5\u30FC\u5F85\u3061",
   idle: "\u505C\u6B62\u4E2D",
 };
@@ -40,6 +40,7 @@ function timeAgo(ts: number): string {
 
 export default function DetailPanel() {
   const selectedProject = useProjectStore((s) => s.selectedProject);
+  const selectedSessionId = useProjectStore((s) => s.selectedSessionId);
   const clearSelection = useProjectStore((s) => s.clearSelection);
   const connections = useConnectionStore((s) => s.connections);
   const { rpc } = useRpc();
@@ -50,11 +51,15 @@ export default function DetailPanel() {
 
   const project = selectedProject();
 
+  const session: SessionState | null = useMemo(() => {
+    if (!project || !selectedSessionId) return project?.sessions[0] ?? null;
+    return project.sessions.find((s) => s.id === selectedSessionId) ?? project.sessions[0] ?? null;
+  }, [project, selectedSessionId]);
+
   const handleSendKeys = useCallback(async () => {
-    if (!project) return;
+    if (!project || !session) return;
     if (!directInput.trim()) return;
-    const session = project.sessions[0];
-    if (!session?.tmuxSession) return;
+    if (!session.tmuxSession) return;
     try {
       await rpc(
         "agent.sendKeys",
@@ -65,12 +70,11 @@ export default function DetailPanel() {
     } catch {
       // Silently fail
     }
-  }, [directInput, project, rpc]);
+  }, [directInput, project, session, rpc]);
 
   const handleCapture = useCallback(async () => {
-    if (!project) return;
-    const session = project.sessions[0];
-    if (!session?.tmuxSession) return;
+    if (!project || !session) return;
+    if (!session.tmuxSession) return;
     setIsCapturing(true);
     try {
       const result = (await rpc(
@@ -84,11 +88,23 @@ export default function DetailPanel() {
     } finally {
       setIsCapturing(false);
     }
-  }, [project, rpc]);
+  }, [project, session, rpc]);
 
   if (!project) return null;
 
   const serverName = connections.get(project.serverId)?.name ?? "Unknown";
+  const displayPhase = session?.phase ?? project.phase;
+  const displayTokens = session
+    ? (session.tokenUsage.inputTokens + session.tokenUsage.outputTokens) / 1000
+    : project.tokenSpend / 1000;
+  const displayLastActive = session?.lastActivityAt ?? project.lastActivity;
+
+  // Show session indicator when project has multiple active sessions
+  const activeSessions = project.sessions.filter((s) => s.isActive);
+  const displayName =
+    activeSessions.length > 1 && session
+      ? `${project.name} #${activeSessions.indexOf(session) + 1}`
+      : project.name;
 
   return (
     <div className="w-80 shrink-0 border-l border-surface-3 flex flex-col overflow-hidden">
@@ -96,7 +112,7 @@ export default function DetailPanel() {
       <div className="p-4 border-b border-surface-3">
         <div className="flex justify-between items-center mb-2">
           <span className="text-[15px] font-bold font-mono text-slate-200 truncate">
-            {project.name}
+            {displayName}
           </span>
           <button
             onClick={clearSelection}
@@ -108,9 +124,9 @@ export default function DetailPanel() {
         <div className="text-xs text-slate-400 mb-3">{project.description}</div>
         <div className="flex gap-2 flex-wrap">
           <span
-            className={`text-[10px] px-2 py-0.5 rounded border font-mono ${PHASE_BADGE[project.phase]}`}
+            className={`text-[10px] px-2 py-0.5 rounded border font-mono ${PHASE_BADGE[displayPhase]}`}
           >
-            {PHASE_LABELS[project.phase]}
+            {PHASE_LABELS[displayPhase]}
           </span>
           <span className="text-[10px] px-2 py-0.5 rounded bg-white/[0.04] text-slate-400 font-mono">
             {project.branch}
@@ -118,6 +134,11 @@ export default function DetailPanel() {
           <span className="text-[10px] px-2 py-0.5 rounded bg-white/[0.04] text-slate-500 font-mono">
             {serverName}
           </span>
+          {session && (
+            <span className="text-[10px] px-2 py-0.5 rounded bg-white/[0.04] text-slate-600 font-mono">
+              {session.id.slice(0, 8)}
+            </span>
+          )}
         </div>
       </div>
 
@@ -133,11 +154,11 @@ export default function DetailPanel() {
               },
               {
                 label: "Tokens",
-                value: `${(project.tokenSpend / 1000).toFixed(1)}k`,
+                value: `${displayTokens.toFixed(1)}k`,
               },
               {
                 label: "Last Active",
-                value: timeAgo(project.lastActivity),
+                value: timeAgo(displayLastActive),
               },
             ] as const
           ).map((stat) => (

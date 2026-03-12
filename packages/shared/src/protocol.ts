@@ -49,7 +49,8 @@ export type ServerNotification =
   | JsonRpcNotification<"decision.resolved", { decisionId: string; option: string }>
   | JsonRpcNotification<"activity.new", { entry: ActivityEntry }>
   | JsonRpcNotification<"tmux.updated", { sessions: TmuxSession[] }>
-  | JsonRpcNotification<"server.config", { config: Omit<ServerConfig, "llm"> }>;
+  | JsonRpcNotification<"server.config", { config: Omit<ServerConfig, "llm"> }>
+  | JsonRpcNotification<"hook.stop", { sessionId: string; projectId: string; projectName: string; lastMessage: string; stopReason: string }>;
 
 // ---- Client → Server Requests ----
 

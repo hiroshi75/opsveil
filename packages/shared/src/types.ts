@@ -36,6 +36,12 @@ export interface SessionState {
   isActive: boolean;
   startedAt: number;
   lastActivityAt: number;
+  /** The type of the most recent JSONL entry ("assistant"|"user"|etc.) */
+  lastEntryType: string | null;
+  /** Per-session phase (derived from lastEntryType + age) */
+  phase: AgentPhase;
+  /** True if the Claude process has exited (stop_hook_summary seen) */
+  terminated: boolean;
   tokenUsage: TokenUsage;
 }
 
@@ -66,6 +72,8 @@ export interface DecisionItem {
   priority: DecisionPriority;
   timestamp: number;
   agentNote: string;
+  /** False when agent completed normally and no user action is needed */
+  requiresAction?: boolean;
   hasScreenshot?: boolean;
   screenshotUrl?: string;
   resolved?: boolean;

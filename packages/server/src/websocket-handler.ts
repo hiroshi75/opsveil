@@ -16,7 +16,6 @@ import type {
 import type { SessionMonitor } from "./session-monitor.js";
 import type { AgentController } from "./agent-controller.js";
 import type { HookManager } from "./hook-manager.js";
-import type { StateInterpreter } from "./state-interpreter.js";
 
 const SERVER_VERSION = "0.1.0";
 
@@ -29,7 +28,6 @@ export class WebSocketHandler {
   private sessionMonitor: SessionMonitor;
   private agentController: AgentController;
   private hookManager: HookManager;
-  private stateInterpreter: StateInterpreter;
   private port: number;
 
   constructor(
@@ -37,13 +35,11 @@ export class WebSocketHandler {
     sessionMonitor: SessionMonitor,
     agentController: AgentController,
     hookManager: HookManager,
-    stateInterpreter: StateInterpreter,
     port: number
   ) {
     this.sessionMonitor = sessionMonitor;
     this.agentController = agentController;
     this.hookManager = hookManager;
-    this.stateInterpreter = stateInterpreter;
     this.port = port;
 
     this.wss = new WebSocketServer({ server });
@@ -87,6 +83,22 @@ export class WebSocketHandler {
         jsonrpc: "2.0",
         method: "activity.new",
         params: { entry },
+      });
+    });
+
+    // When agent transitions to waiting for input, broadcast as hook.stop
+    this.sessionMonitor.on("waiting-for-input", (data: {
+      sessionId: string;
+      projectId: string;
+      projectName: string;
+      lastMessage: string;
+      stopReason: string;
+    }) => {
+      console.log(`[WaitingForInput] project=${data.projectName} session=${data.sessionId}`);
+      this.broadcast({
+        jsonrpc: "2.0",
+        method: "hook.stop",
+        params: data,
       });
     });
   }
@@ -164,6 +176,15 @@ export class WebSocketHandler {
         return {
           entries: this.sessionMonitor.getActivities(projectId, limit),
         };
+      }
+
+      case "session.lastMessage": {
+        const sessionId = params.sessionId as string;
+        if (!sessionId) throw new Error("sessionId is required");
+        const session = this.sessionMonitor.getSession(sessionId);
+        if (!session) throw new Error(`Session not found: ${sessionId}`);
+        const lastMessage = await this.sessionMonitor.getLastAssistantMessage(session.filePath);
+        return { lastMessage };
       }
 
       case "tmux.list": {

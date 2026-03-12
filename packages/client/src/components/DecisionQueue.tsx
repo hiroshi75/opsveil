@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useDecisionStore, type DecisionEntry } from "../stores/decision-store";
 import { useRpc } from "../hooks/use-rpc";
 import type { DecisionPriority } from "@opsveil/shared";
@@ -13,16 +13,85 @@ const PRIORITY_STYLES: Record<DecisionPriority, string> = {
   low: "text-phase-idle bg-gray-500/[0.08]",
 };
 
+const PRIORITY_ORDER: Record<DecisionPriority, number> = {
+  high: 0,
+  medium: 1,
+  low: 2,
+};
+
 // ---------------------------------------------------------------------------
-// DecisionCard
+// InfoCard — no action required, just a dismiss button
+// ---------------------------------------------------------------------------
+
+function InfoCard({
+  decision,
+  onDismiss,
+}: {
+  decision: DecisionEntry;
+  onDismiss: (decisionId: string) => void;
+}) {
+  const [showDetail, setShowDetail] = useState(false);
+
+  return (
+    <div className="bg-green-500/[0.03] border border-green-500/[0.15] rounded-lg p-4 flex flex-col gap-3">
+      {/* Header */}
+      <div className="flex items-center gap-2 mb-1">
+        <span className="text-phase-autonomous text-base">{"\u2713"}</span>
+        <span className="text-[11px] text-slate-500 font-mono">
+          {decision.projectName}
+        </span>
+      </div>
+      <div className="text-slate-200 text-sm font-semibold">
+        {decision.summary}
+      </div>
+
+      {/* Agent Note */}
+      {decision.agentNote && (
+        <div className="text-xs text-slate-400 leading-relaxed font-mono">
+          {decision.agentNote}
+        </div>
+      )}
+
+      {/* Expandable Detail */}
+      {decision.detail && (
+        <>
+          <button
+            onClick={() => setShowDetail(!showDetail)}
+            className="bg-transparent border-none text-slate-500 text-[11px] cursor-pointer text-left p-0 font-mono hover:text-slate-400 transition-colors"
+          >
+            {showDetail ? "\u25BC" : "\u25B6"} {"\u8A73\u7D30"}
+          </button>
+          {showDetail && (
+            <div className="text-slate-400 text-xs leading-relaxed pl-3 border-l-2 border-white/[0.06]">
+              {decision.detail}
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Big dismiss button */}
+      <button
+        onClick={() => onDismiss(decision.id)}
+        className="w-full py-3 bg-green-500/10 hover:bg-green-500/20 border border-green-500/20 hover:border-green-500/30 rounded-md text-phase-autonomous text-sm font-semibold cursor-pointer font-mono transition-all duration-100 active:scale-[0.99]"
+      >
+        OK
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// DecisionCard — requires user action
 // ---------------------------------------------------------------------------
 
 function DecisionCard({
   decision,
   onResolve,
+  onDismiss,
 }: {
   decision: DecisionEntry;
   onResolve: (decisionId: string, option: string) => void;
+  onDismiss: (decisionId: string) => void;
 }) {
   const [selectedOption, setSelectedOption] = useState<string | null>(null);
   const [showDetail, setShowDetail] = useState(false);
@@ -49,6 +118,13 @@ function DecisionCard({
             {decision.summary}
           </div>
         </div>
+        <button
+          onClick={() => onDismiss(decision.id)}
+          className="bg-transparent border-none text-slate-600 cursor-pointer text-sm hover:text-slate-300 transition-colors shrink-0 ml-2 p-1"
+          title="Dismiss"
+        >
+          {"\u2715"}
+        </button>
       </div>
 
       {/* Agent Note */}
@@ -62,7 +138,7 @@ function DecisionCard({
         onClick={() => setShowDetail(!showDetail)}
         className="bg-transparent border-none text-slate-500 text-[11px] cursor-pointer text-left p-0 font-mono hover:text-slate-400 transition-colors"
       >
-        {showDetail ? "\u25BC" : "\u25B6"} \u8A73\u7D30
+        {showDetail ? "\u25BC" : "\u25B6"} {"\u8A73\u7D30"}
       </button>
       {showDetail && (
         <div className="text-slate-400 text-xs leading-relaxed pl-3 border-l-2 border-white/[0.06]">
@@ -123,7 +199,7 @@ function DecisionCard({
           onClick={() => onResolve(decision.id, selectedOption)}
           className="self-end px-5 py-2.5 bg-gradient-to-br from-accent to-accent-dark border-none rounded-md text-white text-[13px] font-semibold cursor-pointer font-mono transition-transform duration-100 hover:scale-[1.02] active:scale-[0.98]"
         >
-          {selectedOption}\u6848\u3067\u9001\u4FE1 \u2192
+          {selectedOption}{"\u6848\u3067\u9001\u4FE1"} {"\u2192"}
         </button>
       )}
     </div>
@@ -135,27 +211,29 @@ function DecisionCard({
 // ---------------------------------------------------------------------------
 
 export default function DecisionQueue() {
-  const sortedDecisions = useDecisionStore((s) => s.sortedDecisions);
+  const rawDecisions = useDecisionStore((s) => s.decisions);
+  const decisions = useMemo(
+    () =>
+      [...rawDecisions].sort(
+        (a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority],
+      ),
+    [rawDecisions],
+  );
   const resolveDecision = useDecisionStore((s) => s.resolveDecision);
+  const dismissDecision = useDecisionStore((s) => s.dismissDecision);
   const resolvedDecisions = useDecisionStore((s) => s.resolvedDecisions);
   const { rpc } = useRpc();
 
-  const decisions = sortedDecisions();
-
   function handleResolve(decisionId: string, option: string) {
-    // Optimistic local update
     resolveDecision(decisionId, option);
 
-    // Send to server (fire and forget)
     const decision = decisions.find((d) => d.id === decisionId);
     if (decision) {
       rpc(
         "decisions.resolve",
         { decisionId, option },
         decision.serverId,
-      ).catch(() => {
-        // Silently fail -- server will reconcile
-      });
+      ).catch(() => {});
     }
   }
 
@@ -173,9 +251,18 @@ export default function DecisionQueue() {
           </div>
         </div>
       ) : (
-        decisions.map((d) => (
-          <DecisionCard key={d.id} decision={d} onResolve={handleResolve} />
-        ))
+        decisions.map((d) =>
+          d.requiresAction === false ? (
+            <InfoCard key={d.id} decision={d} onDismiss={dismissDecision} />
+          ) : (
+            <DecisionCard
+              key={d.id}
+              decision={d}
+              onResolve={handleResolve}
+              onDismiss={dismissDecision}
+            />
+          ),
+        )
       )}
 
       {/* Resolved decisions */}

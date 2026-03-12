@@ -9,14 +9,8 @@ import dotenv from "dotenv";
 import express from "express";
 import cors from "cors";
 import { nanoid } from "nanoid";
-import type {
-  HookStopPayload,
-  HookNotificationPayload,
-  HookPostToolUsePayload,
-} from "@opsveil/shared";
 
 import { SessionMonitor } from "./session-monitor.js";
-import { StateInterpreter } from "./state-interpreter.js";
 import { AgentController } from "./agent-controller.js";
 import { HookManager } from "./hook-manager.js";
 import { WebSocketHandler } from "./websocket-handler.js";
@@ -26,11 +20,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
 
 // ---- Config ----
-const PORT = parseInt(process.env.PORT ?? "7432", 10);
+const PORT = parseInt(process.env.OPSVEIL_PORT ?? process.env.PORT ?? "7432", 10);
 
 // ---- Initialize components ----
 const sessionMonitor = new SessionMonitor();
-const stateInterpreter = new StateInterpreter();
 const agentController = new AgentController();
 const hookManager = new HookManager();
 
@@ -47,48 +40,48 @@ const wsHandler = new WebSocketHandler(
   sessionMonitor,
   agentController,
   hookManager,
-  stateInterpreter,
   PORT
 );
 
 // ---- Hook HTTP Endpoints ----
 
+// Claude Code hook stdin format (actual):
+// { session_id, transcript_path, cwd, hook_event_name, tool_name?, tool_input?, tool_response?, ... }
+// "cwd" is the project path. There is no "project" field.
+// "stop_reason" and "last_message" come from Stop hooks.
+
 app.post("/hooks/stop", async (req, res) => {
   try {
-    const payload = req.body as HookStopPayload;
-    console.log(
-      `[Hook:Stop] session=${payload.session_id} project=${payload.project} reason=${payload.stop_reason}`
-    );
+    const body = req.body as Record<string, unknown>;
+    const sessionId = (body.session_id as string) || "unknown";
+    const cwd = (body.cwd as string) || "";
+    const stopReason = (body.stop_reason as string) || (body.hook_event_name as string) || "stop";
+    const lastMessage = (body.last_message as string) || "";
 
-    const projectInfo = sessionMonitor.resolveProject(payload.project);
-    const projectId = projectInfo?.projectId ?? payload.project;
-    const projectName = projectInfo?.projectName ?? payload.project;
+    const projectInfo = sessionMonitor.resolveProject(cwd);
+    const projectId = projectInfo?.projectId ?? cwd;
+    const projectName = projectInfo?.projectName ?? cwd;
 
-    // Update project phase
+    console.log(`[Hook:Stop] session=${sessionId} project=${projectName} reason=${stopReason}`);
+
     sessionMonitor.updateProjectPhase(projectId, "blocked");
 
-    // Log activity
     sessionMonitor.addActivity({
       id: nanoid(),
       timestamp: Date.now(),
       projectId,
       projectName,
-      sessionId: payload.session_id,
-      action: `Agent stopped: ${payload.stop_reason}`,
+      sessionId,
+      action: `Agent stopped: ${stopReason}`,
       type: "blocked",
-      detail: payload.last_message?.slice(0, 500),
+      detail: lastMessage.slice(0, 500) || undefined,
     });
 
-    // Use LLM to interpret and create a decision item
-    const decision = await stateInterpreter.interpretStop({
-      projectId,
-      projectName,
-      sessionId: payload.session_id,
-      lastMessage: payload.last_message ?? "",
-      stopReason: payload.stop_reason ?? "unknown",
+    wsHandler.broadcast({
+      jsonrpc: "2.0",
+      method: "hook.stop",
+      params: { sessionId, projectId, projectName, lastMessage, stopReason },
     });
-
-    wsHandler.addDecision(decision);
 
     res.json({ status: "ok" });
   } catch (err) {
@@ -99,24 +92,27 @@ app.post("/hooks/stop", async (req, res) => {
 
 app.post("/hooks/notification", (req, res) => {
   try {
-    const payload = req.body as HookNotificationPayload;
-    console.log(
-      `[Hook:Notification] session=${payload.session_id} title=${payload.title}`
-    );
+    const body = req.body as Record<string, unknown>;
+    const sessionId = (body.session_id as string) || "unknown";
+    const cwd = (body.cwd as string) || "";
+    const title = (body.title as string) || (body.hook_event_name as string) || "Notification";
+    const message = (body.message as string) || "";
 
-    const projectInfo = sessionMonitor.resolveProject(payload.project);
-    const projectId = projectInfo?.projectId ?? payload.project;
-    const projectName = projectInfo?.projectName ?? payload.project;
+    const projectInfo = sessionMonitor.resolveProject(cwd);
+    const projectId = projectInfo?.projectId ?? cwd;
+    const projectName = projectInfo?.projectName ?? cwd;
+
+    console.log(`[Hook:Notification] session=${sessionId} project=${projectName} title=${title}`);
 
     sessionMonitor.addActivity({
       id: nanoid(),
       timestamp: Date.now(),
       projectId,
       projectName,
-      sessionId: payload.session_id,
-      action: payload.title,
+      sessionId,
+      action: title,
       type: "running",
-      detail: payload.message,
+      detail: message || undefined,
     });
 
     res.json({ status: "ok" });
@@ -128,24 +124,30 @@ app.post("/hooks/notification", (req, res) => {
 
 app.post("/hooks/post-tool-use", (req, res) => {
   try {
-    const payload = req.body as HookPostToolUsePayload;
-    console.log(
-      `[Hook:PostToolUse] session=${payload.session_id} tool=${payload.tool_name}`
-    );
+    const body = req.body as Record<string, unknown>;
+    const sessionId = (body.session_id as string) || "unknown";
+    const cwd = (body.cwd as string) || "";
+    const toolName = (body.tool_name as string) || "unknown";
+    const toolResponse = body.tool_response as Record<string, unknown> | undefined;
+    const toolOutput = toolResponse
+      ? (toolResponse.stdout as string) || (toolResponse.stderr as string) || ""
+      : "";
 
-    const projectInfo = sessionMonitor.resolveProject(payload.project);
-    const projectId = projectInfo?.projectId ?? payload.project;
-    const projectName = projectInfo?.projectName ?? payload.project;
+    const projectInfo = sessionMonitor.resolveProject(cwd);
+    const projectId = projectInfo?.projectId ?? cwd;
+    const projectName = projectInfo?.projectName ?? cwd;
+
+    console.log(`[Hook:PostToolUse] session=${sessionId} project=${projectName} tool=${toolName}`);
 
     sessionMonitor.addActivity({
       id: nanoid(),
       timestamp: Date.now(),
       projectId,
       projectName,
-      sessionId: payload.session_id,
-      action: `Tool: ${payload.tool_name}`,
+      sessionId,
+      action: `Tool: ${toolName}`,
       type: "tool_use",
-      detail: payload.tool_output?.slice(0, 500),
+      detail: toolOutput.slice(0, 500) || undefined,
     });
 
     res.json({ status: "ok" });
@@ -164,6 +166,13 @@ app.get("/health", (_req, res) => {
 async function main(): Promise<void> {
   await sessionMonitor.start();
 
+  // Auto-install Claude Code hooks on startup
+  try {
+    await hookManager.installHooks(PORT);
+  } catch (err) {
+    console.warn("[OpsVeil] Failed to install hooks:", err);
+  }
+
   server.listen(PORT, () => {
     console.log(`[OpsVeil] Server listening on http://localhost:${PORT}`);
     console.log(`[OpsVeil] WebSocket available at ws://localhost:${PORT}`);
@@ -173,6 +182,13 @@ async function main(): Promise<void> {
     console.log(`  POST http://localhost:${PORT}/hooks/post-tool-use`);
   });
 }
+
+// Clean up hooks on exit
+function cleanup() {
+  hookManager.uninstallHooks(PORT).catch(() => {});
+}
+process.on("SIGINT", () => { cleanup(); process.exit(0); });
+process.on("SIGTERM", () => { cleanup(); process.exit(0); });
 
 main().catch((err) => {
   console.error("[OpsVeil] Fatal error:", err);

@@ -13,11 +13,13 @@ const STATUS_DOT: Record<string, string> = {
 
 export default function TopBar() {
   const [showServerManager, setShowServerManager] = useState(false);
-  const allProjects = useProjectStore((s) => s.allProjects);
+  const projectsMap = useProjectStore((s) => s.projects);
   const decisions = useDecisionStore((s) => s.decisions);
   const connections = useConnectionStore((s) => s.connections);
 
-  const projects = allProjects();
+  const projects = Array.from(projectsMap.values()).sort(
+    (a, b) => b.lastActivity - a.lastActivity,
+  );
   const blockedCount = projects.filter((p) => p.phase === "blocked").length;
   const reviewCount = projects.filter((p) => p.phase === "review").length;
   const autonomousCount = projects.filter(

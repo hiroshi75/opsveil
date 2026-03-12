@@ -1,12 +1,12 @@
 import { useState, useEffect } from "react";
 import { useConnectionStore } from "./stores/connection-store";
 import { useDecisionStore } from "./stores/decision-store";
+import { useProjectStore } from "./stores/project-store";
 import TopBar from "./components/TopBar";
 import ProjectSidebar from "./components/ProjectSidebar";
 import DecisionQueue from "./components/DecisionQueue";
 import ActivityFeed from "./components/ActivityFeed";
 import DetailPanel from "./components/DetailPanel";
-import { useProjectStore } from "./stores/project-store";
 
 // ---------------------------------------------------------------------------
 // Tab types
@@ -20,26 +20,27 @@ type CenterTab = "decisions" | "activity";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<CenterTab>("decisions");
-  const loadServers = useConnectionStore((s) => s._loadServers);
   const connections = useConnectionStore((s) => s.connections);
-  const connect = useConnectionStore((s) => s.connect);
   const decisions = useDecisionStore((s) => s.decisions);
-  const selectedProject = useProjectStore((s) => s.selectedProject);
+  const selectedKey = useProjectStore((s) => s.selectedKey);
+  const projectsMap = useProjectStore((s) => s.projects);
 
-  const project = selectedProject();
+  const project = selectedKey ? projectsMap.get(selectedKey) ?? null : null;
 
-  // Load persisted servers on mount and auto-connect
+  // Load persisted servers on mount and auto-connect them once
   useEffect(() => {
-    loadServers();
-  }, [loadServers]);
-
-  useEffect(() => {
-    for (const [id, conn] of connections) {
-      if (conn.status === "disconnected" && !conn.reconnectTimer) {
-        connect(id);
+    useConnectionStore.getState()._loadServers();
+    // Auto-connect after a tick so loadServers state is committed
+    const timer = setTimeout(() => {
+      const conns = useConnectionStore.getState().connections;
+      for (const [id, conn] of conns) {
+        if (conn.status === "disconnected") {
+          useConnectionStore.getState().connect(id);
+        }
       }
-    }
-  }, [connections, connect]);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, []);
 
   return (
     <div className="w-full min-h-screen bg-surface-0 text-slate-200 font-sans flex flex-col">

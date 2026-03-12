@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { DecisionItem, DecisionPriority } from "@opsveil/shared";
+import type { HookStopParams } from "../lib/state-interpreter";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -7,6 +8,8 @@ import type { DecisionItem, DecisionPriority } from "@opsveil/shared";
 
 export interface DecisionEntry extends DecisionItem {
   serverId: string;
+  /** Original params for re-interpretation when language changes */
+  sourceParams?: HookStopParams;
 }
 
 export interface ResolvedEntry {
@@ -23,8 +26,12 @@ interface DecisionStore {
   resolvedDecisions: ResolvedEntry[];
 
   // Actions
-  addDecision: (serverId: string, decision: DecisionItem) => void;
+  addDecision: (serverId: string, decision: DecisionItem, sourceParams?: HookStopParams) => void;
+  updateDecision: (decisionId: string, updates: Partial<DecisionItem>) => void;
   removeDecision: (decisionId: string) => void;
+  dismissDecision: (decisionId: string) => void;
+  dismissByProject: (projectId: string) => void;
+  dismissBySession: (sessionId: string) => void;
   resolveDecision: (decisionId: string, option: string) => void;
 
   // Computed
@@ -49,21 +56,47 @@ export const useDecisionStore = create<DecisionStore>((set, get) => ({
   decisions: [],
   resolvedDecisions: [],
 
-  addDecision(serverId: string, decision: DecisionItem) {
+  addDecision(serverId: string, decision: DecisionItem, sourceParams?: HookStopParams) {
     set((state) => {
       // Prevent duplicates
       if (state.decisions.some((d) => d.id === decision.id)) {
         return state;
       }
       return {
-        decisions: [...state.decisions, { ...decision, serverId }],
+        decisions: [...state.decisions, { ...decision, serverId, sourceParams }],
       };
     });
+  },
+
+  updateDecision(decisionId: string, updates: Partial<DecisionItem>) {
+    set((state) => ({
+      decisions: state.decisions.map((d) =>
+        d.id === decisionId ? { ...d, ...updates } : d,
+      ),
+    }));
   },
 
   removeDecision(decisionId: string) {
     set((state) => ({
       decisions: state.decisions.filter((d) => d.id !== decisionId),
+    }));
+  },
+
+  dismissDecision(decisionId: string) {
+    set((state) => ({
+      decisions: state.decisions.filter((d) => d.id !== decisionId),
+    }));
+  },
+
+  dismissByProject(projectId: string) {
+    set((state) => ({
+      decisions: state.decisions.filter((d) => d.projectId !== projectId),
+    }));
+  },
+
+  dismissBySession(sessionId: string) {
+    set((state) => ({
+      decisions: state.decisions.filter((d) => d.sessionId !== sessionId),
     }));
   },
 

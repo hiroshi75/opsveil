@@ -36,6 +36,9 @@ importers:
         specifier: ^5.0.0
         version: 5.0.11(@types/react@19.2.14)(react@19.2.4)
     devDependencies:
+      '@google/genai':
+        specifier: ^1.44.0
+        version: 1.44.0
       '@tauri-apps/cli':
         specifier: ^2.5.0
         version: 2.10.1
@@ -66,9 +69,6 @@ importers:
 
   packages/server:
     dependencies:
-      '@google/genai':
-        specifier: ^1.0.0
-        version: 1.44.0
       '@opsveil/shared':
         specifier: workspace:*
         version: link:../shared
