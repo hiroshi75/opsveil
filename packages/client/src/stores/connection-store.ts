@@ -83,6 +83,9 @@ const suppressReconnect = new Set<string>();
 /** Track the "current" WebSocket for each connection to detect stale callbacks */
 const liveWs = new Map<string, WebSocket>();
 
+/** Guard against overlapping reconnect / connect attempts */
+const connectInProgress = new Set<string>();
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
@@ -115,6 +118,7 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
     get().disconnect(id);
     liveWs.delete(id);
     suppressReconnect.delete(id);
+    connectInProgress.delete(id);
     set((state) => {
       const next = new Map(state.connections);
       next.delete(id);
@@ -127,16 +131,24 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
     const state = get();
     const conn = state.connections.get(id);
     if (!conn) return;
+
+    // Prevent duplicate connection attempts (race condition guard)
+    if (connectInProgress.has(id)) return;
     if (conn.ws && conn.status === "connected") return;
 
-    // Clean up previous connection
+    connectInProgress.add(id);
+
+    // Clean up previous connection — close and wait for it to finish
     const prevWs = liveWs.get(id);
     if (prevWs) {
       prevWs.onopen = null;
       prevWs.onclose = null;
       prevWs.onerror = null;
       prevWs.onmessage = null;
-      prevWs.close();
+      if (prevWs.readyState !== WebSocket.CLOSED && prevWs.readyState !== WebSocket.CLOSING) {
+        prevWs.close();
+      }
+      liveWs.delete(id);
     }
     if (conn.reconnectTimer) {
       clearTimeout(conn.reconnectTimer);
@@ -149,6 +161,7 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
     try {
       ws = new WebSocket(conn.url);
     } catch {
+      connectInProgress.delete(id);
       get()._setConnectionStatus(id, "error");
       return;
     }
@@ -158,6 +171,8 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
     ws.onopen = () => {
       // Ignore if this ws is no longer the current one
       if (liveWs.get(id) !== ws) return;
+
+      connectInProgress.delete(id);
 
       set((s) => {
         const next = new Map(s.connections);
@@ -217,7 +232,10 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
       // Ignore if this ws is no longer the current one, or manually disconnected
       if (liveWs.get(id) !== ws || suppressReconnect.has(id)) return;
 
+      connectInProgress.delete(id);
+      liveWs.delete(id);
       get()._setConnectionStatus(id, "disconnected");
+
       // Schedule auto-reconnect
       const current = get().connections.get(id);
       if (!current) return;
@@ -246,6 +264,7 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
 
     ws.onerror = () => {
       if (liveWs.get(id) !== ws) return;
+      connectInProgress.delete(id);
       get()._setConnectionStatus(id, "error");
     };
 
@@ -262,6 +281,7 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
 
   disconnect(id: string) {
     suppressReconnect.add(id);
+    connectInProgress.delete(id);
 
     const conn = get().connections.get(id);
     if (!conn) return;
@@ -276,7 +296,9 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
       ws.onclose = null;
       ws.onerror = null;
       ws.onmessage = null;
-      ws.close();
+      if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+        ws.close();
+      }
     }
     liveWs.delete(id);
 
