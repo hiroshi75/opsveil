@@ -3,6 +3,8 @@
 // ============================================================
 
 import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import dotenv from "dotenv";
@@ -21,6 +23,8 @@ dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
 
 // ---- Config ----
 const PORT = parseInt(process.env.OPSVEIL_PORT ?? process.env.PORT ?? "7432", 10);
+const SHUTDOWN_TIMEOUT_MS = 10_000;
+const RUN_DIR = path.join(os.tmpdir(), "opsveil");
 
 // ---- Initialize components ----
 const sessionMonitor = new SessionMonitor();
@@ -162,8 +166,125 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", uptime: process.uptime() });
 });
 
+// ---- PID file management ----
+
+function getPidFilePath(): string {
+  return path.join(RUN_DIR, `opsveil-${PORT}.pid`);
+}
+
+function writePidFile(): void {
+  fs.mkdirSync(RUN_DIR, { recursive: true });
+  fs.writeFileSync(getPidFilePath(), String(process.pid), "utf-8");
+}
+
+function removePidFile(): void {
+  try {
+    fs.unlinkSync(getPidFilePath());
+  } catch {
+    // Already removed or never created
+  }
+  // Remove run dir if empty
+  try {
+    const entries = fs.readdirSync(RUN_DIR);
+    if (entries.length === 0) fs.rmdirSync(RUN_DIR);
+  } catch {
+    // Not empty or already gone
+  }
+}
+
+/**
+ * Check for stale PID files from a previous crashed process and clean up.
+ */
+function cleanupStalePidFile(): void {
+  const pidFile = getPidFilePath();
+  let oldPid: number;
+  try {
+    oldPid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
+  } catch {
+    return; // No PID file
+  }
+
+  // Check if the old process is still running
+  let isRunning = false;
+  try {
+    process.kill(oldPid, 0); // Signal 0 = check existence without killing
+    isRunning = true;
+  } catch {
+    isRunning = false;
+  }
+
+  if (isRunning) {
+    console.warn(`[OpsVeil] Another instance (PID ${oldPid}) is still running on port ${PORT}`);
+    console.warn(`[OpsVeil] If this is stale, remove ${pidFile} manually`);
+    process.exit(1);
+  }
+
+  // Stale PID file — previous process crashed
+  console.log(`[OpsVeil] Cleaning up stale PID file from previous process (PID ${oldPid})`);
+  removePidFile();
+
+  // Clean up leftover hooks from the crashed process
+  hookManager.uninstallHooks(PORT).catch(() => {});
+}
+
+// ---- Graceful shutdown ----
+
+let shutdownInProgress = false;
+
+async function gracefulShutdown(signal: string): Promise<void> {
+  if (shutdownInProgress) return;
+  shutdownInProgress = true;
+
+  console.log(`\n[OpsVeil] Received ${signal}, shutting down gracefully...`);
+
+  // Force exit if shutdown takes too long
+  const forceExitTimer = setTimeout(() => {
+    console.error("[OpsVeil] Shutdown timed out, forcing exit");
+    removePidFile();
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS);
+  forceExitTimer.unref();
+
+  try {
+    // 1. Stop accepting new connections
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+    });
+    console.log("[OpsVeil] HTTP server closed");
+
+    // 2. Close WebSocket connections
+    await wsHandler.close();
+    console.log("[OpsVeil] WebSocket connections closed");
+
+    // 3. Stop session monitor (watchers + poll timer)
+    await sessionMonitor.stop();
+    console.log("[OpsVeil] Session monitor stopped");
+
+    // 4. Stop managed tmux sessions
+    await agentController.stopAll(5000);
+
+    // 5. Uninstall hooks from Claude Code settings
+    await hookManager.uninstallHooks(PORT);
+    console.log("[OpsVeil] Hooks uninstalled");
+  } catch (err) {
+    console.error("[OpsVeil] Error during shutdown:", err);
+  } finally {
+    // 6. Remove PID file
+    removePidFile();
+    console.log("[OpsVeil] Shutdown complete");
+    clearTimeout(forceExitTimer);
+    process.exit(0);
+  }
+}
+
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+
 // ---- Start ----
 async function main(): Promise<void> {
+  // Clean up artifacts from previous crashed process
+  cleanupStalePidFile();
+
   await sessionMonitor.start();
 
   // Auto-install Claude Code hooks on startup
@@ -174,7 +295,10 @@ async function main(): Promise<void> {
   }
 
   server.listen(PORT, () => {
-    console.log(`[OpsVeil] Server listening on http://localhost:${PORT}`);
+    // Write PID file after successful bind
+    writePidFile();
+
+    console.log(`[OpsVeil] Server listening on http://localhost:${PORT} (PID ${process.pid})`);
     console.log(`[OpsVeil] WebSocket available at ws://localhost:${PORT}`);
     console.log(`[OpsVeil] Hook endpoints:`);
     console.log(`  POST http://localhost:${PORT}/hooks/stop`);
@@ -183,14 +307,8 @@ async function main(): Promise<void> {
   });
 }
 
-// Clean up hooks on exit
-function cleanup() {
-  hookManager.uninstallHooks(PORT).catch(() => {});
-}
-process.on("SIGINT", () => { cleanup(); process.exit(0); });
-process.on("SIGTERM", () => { cleanup(); process.exit(0); });
-
 main().catch((err) => {
   console.error("[OpsVeil] Fatal error:", err);
+  removePidFile();
   process.exit(1);
 });

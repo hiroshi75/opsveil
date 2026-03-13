@@ -128,6 +128,28 @@ export class WebSocketHandler {
     }
   }
 
+  /** Gracefully close all WebSocket connections and shut down the server */
+  async close(): Promise<void> {
+    // Notify clients of shutdown
+    const shutdownMsg = JSON.stringify({
+      jsonrpc: "2.0",
+      method: "server.shutdown",
+      params: { reason: "Server shutting down" },
+    });
+    for (const client of this.clients) {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(shutdownMsg);
+        client.close(1001, "Server shutting down");
+      }
+    }
+    this.clients.clear();
+
+    // Close the WebSocket server
+    await new Promise<void>((resolve) => {
+      this.wss.close(() => resolve());
+    });
+  }
+
   // ---- Internal message dispatch ----
 
   private async handleMessage(ws: WebSocket, raw: string): Promise<void> {

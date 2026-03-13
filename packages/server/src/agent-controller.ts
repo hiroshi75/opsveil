@@ -150,6 +150,43 @@ export class AgentController {
   }
 
   /**
+   * Stop all OpsVeil-managed tmux sessions with a timeout.
+   * Sends SIGTERM first, then SIGKILL if sessions don't exit within the timeout.
+   */
+  async stopAll(timeoutMs = 5000): Promise<void> {
+    let sessions: { name: string }[];
+    try {
+      sessions = await this.listSessions();
+    } catch {
+      return; // No tmux server running
+    }
+
+    if (sessions.length === 0) return;
+
+    console.log(`[AgentController] Stopping ${sessions.length} tmux session(s)...`);
+
+    // Kill all sessions in parallel
+    const killPromises = sessions.map((s) =>
+      this.killSession(s.name).catch(() => {})
+    );
+    await Promise.all(killPromises);
+
+    // Wait for sessions to actually terminate
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const remaining = await this.listSessions();
+        if (remaining.length === 0) break;
+      } catch {
+        break; // No tmux server = all sessions gone
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    console.log("[AgentController] All sessions stopped");
+  }
+
+  /**
    * Shell-escape a string for safe embedding in a shell command.
    */
   private shellEscape(str: string): string {
