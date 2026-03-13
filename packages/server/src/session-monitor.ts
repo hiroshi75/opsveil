@@ -232,9 +232,23 @@ export class SessionMonitor extends EventEmitter {
 
     // Read only the new bytes
     const newData = await this.readRange(filePath, previousSize, currentSize);
-    this.fileOffsets.set(filePath, { size: currentSize });
 
-    if (!newData.trim()) return;
+    if (!newData.trim()) {
+      this.fileOffsets.set(filePath, { size: currentSize });
+      return;
+    }
+
+    // Only advance offset up to the last complete line.
+    // If the writer is mid-write, the trailing incomplete line will be
+    // re-read on the next poll instead of being silently dropped.
+    const lastNewline = newData.lastIndexOf("\n");
+    if (lastNewline < 0) {
+      // No complete line yet — don't advance offset, retry next poll
+      return;
+    }
+    const completeData = newData.slice(0, lastNewline + 1);
+    const bytesConsumed = Buffer.byteLength(completeData, "utf-8");
+    this.fileOffsets.set(filePath, { size: previousSize + bytesConsumed });
 
     // Parse the project/session context from the file path
     const ctx = this.parseFilePath(filePath);
@@ -245,13 +259,13 @@ export class SessionMonitor extends EventEmitter {
     const session = this.ensureSession(project, filePath, ctx.sessionId, stat.mtimeMs);
 
     // Process each new JSONL line
-    const lines = newData.split("\n").filter((l) => l.trim());
+    const lines = completeData.split("\n").filter((l) => l.trim());
     for (const line of lines) {
       try {
         const parsed = JSON.parse(line);
         this.processJsonlEntry(project, session, parsed);
       } catch {
-        // Skip malformed lines
+        // Skip malformed lines (shouldn't happen with complete lines)
       }
     }
 

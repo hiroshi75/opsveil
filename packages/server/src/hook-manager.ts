@@ -5,6 +5,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { atomicWriteFile, safeReadJson } from "./safe-io.js";
 
 interface ClaudeHookEntry {
   matcher: string;
@@ -51,14 +52,7 @@ export class HookManager {
    */
   async installHooks(port: number): Promise<void> {
     const settingsPath = path.join(this.claudeDir, "settings.json");
-    let settings: ClaudeSettings = {};
-
-    try {
-      const raw = await fs.promises.readFile(settingsPath, "utf-8");
-      settings = JSON.parse(raw);
-    } catch {
-      // File doesn't exist or is invalid — start fresh
-    }
+    let settings: ClaudeSettings = await safeReadJson<ClaudeSettings>(settingsPath, {});
 
     if (!settings.hooks) {
       settings.hooks = {};
@@ -93,13 +87,9 @@ export class HookManager {
       settings.hooks[event].push(opsveilEntry);
     }
 
-    // Write back
+    // Atomic write: temp file + rename to avoid partial reads
     await fs.promises.mkdir(path.dirname(settingsPath), { recursive: true });
-    await fs.promises.writeFile(
-      settingsPath,
-      JSON.stringify(settings, null, 2) + "\n",
-      "utf-8"
-    );
+    await atomicWriteFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
 
     console.log(`[HookManager] Installed hooks → ${settingsPath} (port=${port})`);
   }
@@ -110,14 +100,8 @@ export class HookManager {
   async uninstallHooks(port?: number): Promise<void> {
     const settingsPath = path.join(this.claudeDir, "settings.json");
 
-    let settings: ClaudeSettings;
-    try {
-      const raw = await fs.promises.readFile(settingsPath, "utf-8");
-      settings = JSON.parse(raw);
-    } catch {
-      // Nothing to uninstall
-      return;
-    }
+    const settings = await safeReadJson<ClaudeSettings | null>(settingsPath, null);
+    if (!settings) return; // File doesn't exist or unreadable — nothing to uninstall
 
     if (!settings.hooks) return;
 
@@ -141,11 +125,7 @@ export class HookManager {
       delete settings.hooks;
     }
 
-    await fs.promises.writeFile(
-      settingsPath,
-      JSON.stringify(settings, null, 2) + "\n",
-      "utf-8"
-    );
+    await atomicWriteFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
 
     console.log(`[HookManager] Uninstalled hooks from ${settingsPath}`);
   }
