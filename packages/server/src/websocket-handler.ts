@@ -281,7 +281,7 @@ export class WebSocketHandler {
     decisionId: string,
     option: string,
     message?: string
-  ): Promise<{ success: boolean }> {
+  ): Promise<{ success: boolean; attempts?: number; warning?: string }> {
     const decision = this.decisions.find((d) => d.id === decisionId);
     if (!decision) {
       throw new Error(`Decision not found: ${decisionId}`);
@@ -301,8 +301,42 @@ export class WebSocketHandler {
       (s) => s.name === decision.projectId || s.projectId === decision.projectId
     );
 
+    let attempts = 0;
+    let warning: string | undefined;
+
     if (tmuxSession) {
-      await this.agentController.sendKeys(tmuxSession.name, responseText);
+      try {
+        const result = await this.agentController.sendKeysWithRetry(
+          tmuxSession.name,
+          responseText,
+        );
+        attempts = result.attempts;
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        console.error(
+          `[WebSocket] Decision injection failed for decision=${decisionId} ` +
+          `project=${decision.projectName} session=${tmuxSession.name}: ${errMsg}`,
+        );
+        // Mark resolved anyway so UI isn't stuck, but include warning
+        warning = `Injection failed: ${errMsg}`;
+
+        // Log the failure as an activity
+        this.sessionMonitor.addActivity({
+          id: nanoid(),
+          timestamp: Date.now(),
+          projectId: decision.projectId,
+          projectName: decision.projectName,
+          sessionId: decision.sessionId,
+          action: `Decision injection failed: ${errMsg}`,
+          type: "error",
+        });
+      }
+    } else {
+      console.warn(
+        `[WebSocket] No tmux session found for project=${decision.projectId} ` +
+        `when resolving decision=${decisionId}`,
+      );
+      warning = "No tmux session found for this project";
     }
 
     // Mark as resolved
@@ -328,7 +362,7 @@ export class WebSocketHandler {
       type: "decision_resolved",
     });
 
-    return { success: true };
+    return { success: !warning, attempts, warning };
   }
 
   private sendResult(

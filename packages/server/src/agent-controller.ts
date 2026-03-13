@@ -8,6 +8,41 @@ import type { TmuxSession } from "@opsveil/shared";
 
 const execFile = promisify(execFileCb);
 
+// ---------------------------------------------------------------------------
+// Retry configuration (configurable via env vars)
+// ---------------------------------------------------------------------------
+
+const DEFAULT_INJECTION_RETRIES = 3;
+const DEFAULT_INJECTION_TIMEOUT_MS = 10_000;
+const BASE_RETRY_DELAY_MS = 500;
+const MAX_RETRY_DELAY_MS = 8_000;
+
+/** Errors that indicate the session is permanently gone (no point retrying) */
+const NON_RETRYABLE_PATTERNS = ["not found", "no such session", "can't find session"];
+
+export function getInjectionRetryConfig() {
+  const maxRetries = parseInt(process.env.OPSVEIL_INJECTION_RETRIES ?? "", 10);
+  const timeoutMs = parseInt(process.env.OPSVEIL_INJECTION_TIMEOUT_MS ?? "", 10);
+  return {
+    maxRetries: Number.isFinite(maxRetries) ? maxRetries : DEFAULT_INJECTION_RETRIES,
+    timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : DEFAULT_INJECTION_TIMEOUT_MS,
+  };
+}
+
+function isRetryableInjectionError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return !NON_RETRYABLE_PATTERNS.some((p) => msg.toLowerCase().includes(p));
+}
+
+function injectionBackoffDelay(attempt: number): number {
+  const jitter = Math.random() * 0.3 + 0.85; // 0.85–1.15
+  return Math.min(BASE_RETRY_DELAY_MS * Math.pow(2, attempt) * jitter, MAX_RETRY_DELAY_MS);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export class AgentController {
   /**
    * List all tmux sessions with parsed metadata.
@@ -97,7 +132,7 @@ export class AgentController {
   }
 
   /**
-   * Send keystrokes to a tmux session.
+   * Send keystrokes to a tmux session (single attempt, no retry).
    */
   async sendKeys(sessionName: string, text: string): Promise<void> {
     try {
@@ -111,6 +146,54 @@ export class AgentController {
       }
       throw new Error(`Failed to send keys: ${message}`);
     }
+  }
+
+  /**
+   * Send keystrokes with retry + exponential backoff.
+   * Used for decision injection where transient failures should be recovered.
+   */
+  async sendKeysWithRetry(sessionName: string, text: string): Promise<{ attempts: number }> {
+    const { maxRetries } = getInjectionRetryConfig();
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        if (attempt > 0) {
+          const delay = injectionBackoffDelay(attempt - 1);
+          console.info(
+            `[AgentController] sendKeys retry ${attempt}/${maxRetries} for session="${sessionName}" after ${Math.round(delay)}ms`,
+          );
+          await sleep(delay);
+        }
+
+        await this.sendKeys(sessionName, text);
+
+        if (attempt > 0) {
+          console.info(
+            `[AgentController] sendKeys succeeded on retry ${attempt} for session="${sessionName}"`,
+          );
+        }
+        return { attempts: attempt + 1 };
+      } catch (err) {
+        lastError = err;
+        const errMsg = err instanceof Error ? err.message : String(err);
+        console.error(
+          `[AgentController] sendKeys attempt ${attempt + 1}/${maxRetries + 1} failed for session="${sessionName}": ${errMsg}`,
+        );
+
+        if (!isRetryableInjectionError(err)) {
+          console.warn(
+            `[AgentController] Non-retryable error for session="${sessionName}", skipping remaining retries`,
+          );
+          break;
+        }
+      }
+    }
+
+    const errMsg = lastError instanceof Error ? lastError.message : String(lastError);
+    throw new Error(
+      `Decision injection failed after ${maxRetries + 1} attempts for session="${sessionName}": ${errMsg}`,
+    );
   }
 
   /**

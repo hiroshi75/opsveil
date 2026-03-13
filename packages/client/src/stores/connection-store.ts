@@ -562,6 +562,20 @@ async function handleHookStop(
     const decision = await interpretStopEvent(payload, apiKey);
     useDecisionStore.getState().addDecision(serverId, decision, payload);
   } catch (err) {
-    console.error("[handleHookStop] Failed to interpret stop event:", err);
+    console.error(
+      "[handleHookStop] Failed to interpret stop event for session %s (project: %s, reason: %s):",
+      payload.sessionId,
+      payload.projectName,
+      payload.stopReason,
+      err,
+    );
+    // Even on unexpected failure, add a fallback decision so the UI isn't stuck
+    const { buildFallbackDecision } = await import("../lib/state-interpreter");
+    const fallback = buildFallbackDecision(
+      payload,
+      undefined,
+      `Unexpected error: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    useDecisionStore.getState().addDecision(serverId, fallback, payload);
   }
 }
